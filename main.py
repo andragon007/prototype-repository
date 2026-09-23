@@ -2,10 +2,30 @@ import os
 import subprocess
 import tempfile
 from dotenv import load_dotenv
-from groq import Groq
+from openai import OpenAI
 
+# Load environment variables
 load_dotenv()
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+# 1. Read the user's choices from the .env file
+provider = os.getenv("AI_PROVIDER", "groq")
+api_key = os.getenv("AI_API_KEY")
+model_name = os.getenv("AI_MODEL", "openai/gpt-oss-120b")
+
+# 2. Determine the "Address" (Base URL) based on the provider
+if provider.lower() == "groq":
+    base_url = "https://api.groq.com/openai/v1"
+elif provider.lower() == "openai":
+    base_url = "https://api.openai.com/v1"
+elif provider.lower() == "local":
+    base_url = "http://localhost:11434/v1" # Standard address for Ollama
+else:
+    base_url = "https://api.groq.com/openai/v1" # Default fallback
+
+# 3. Create the client using the user's specific settings
+client = OpenAI(api_key=api_key, base_url=base_url)
+
+print(f"🚀 Connected to {provider} using model: {model_name}")
 
 SYSTEM_PROMPT = """
 You are an expert software engineer practicing "Design by Contract". 
@@ -28,10 +48,11 @@ def ask_ai_for_code(task_description, error_feedback=""):
     else:
         messages.append({"role": "user", "content": task_description})
     
-    print(f"🤖 Asking AI to write code...\n")
+    print(f" Asking AI to write code...\n")
     
+    # Notice we now use the model_name variable from the .env file!
     response = client.chat.completions.create(
-        model="openai/gpt-oss-120b",
+        model=model_name, 
         messages=messages,
         temperature=0.2
     )
@@ -39,13 +60,11 @@ def ask_ai_for_code(task_description, error_feedback=""):
     return response.choices[0].message.content
 
 def execute_code_locally(code_string):
-    """Runs code locally using your installed Python"""
     with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
         f.write(code_string)
         temp_file = f.name
     
     try:
-        # Run using your local Python installation
         result = subprocess.run(["python", temp_file], capture_output=True, text=True, timeout=10)
         
         if result.returncode == 0:
@@ -72,7 +91,6 @@ def generate_and_verify(task, max_retries=3):
         print("\n--- Generated Code ---")
         print(code[:500] + "..." if len(code) > 500 else code)
         
-        # Execute the code LOCALLY
         success, error = execute_code_locally(code)
         
         if success:
