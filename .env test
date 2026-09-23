@@ -1,0 +1,8 @@
+   # Choose your provider: groq, openai, or local
+   AI_PROVIDER=groq
+
+   # Paste your API key here
+   AI_API_KEY=your_api_key_here
+
+   # Type the exact name of the model you want to use
+   AI_MODEL=openai/gpt-oss-120b
