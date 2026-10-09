@@ -1,109 +1,116 @@
 import os
 import subprocess
 import tempfile
+import sys
 from dotenv import load_dotenv
 from openai import OpenAI
 
-# Load environment variables
 load_dotenv()
 
-# 1. Read the user's choices from the .env file
 provider = os.getenv("AI_PROVIDER", "groq")
 api_key = os.getenv("AI_API_KEY")
 model_name = os.getenv("AI_MODEL", "openai/gpt-oss-120b")
 
-# 2. Determine the "Address" (Base URL) based on the provider
 if provider.lower() == "groq":
     base_url = "https://api.groq.com/openai/v1"
 elif provider.lower() == "openai":
     base_url = "https://api.openai.com/v1"
-elif provider.lower() == "local":
-    base_url = "http://localhost:11434/v1" # Standard address for Ollama
 else:
-    base_url = "https://api.groq.com/openai/v1" # Default fallback
+    base_url = "https://api.groq.com/openai/v1"
 
-# 3. Create the client using the user's specific settings
 client = OpenAI(api_key=api_key, base_url=base_url)
+print(f"[AGENT] Initialized using {provider} ({model_name})")
 
-print(f"🚀 Connected to {provider} using model: {model_name}")
-
-SYSTEM_PROMPT = """
-You are an expert software engineer practicing "Design by Contract". 
-When asked to write a function, you MUST follow these rules:
-
-1. PRECONDITIONS: At the very beginning of the function, use standard Python `assert` statements to validate all inputs.
-2. POSTCONDITIONS: At the very end of the function, use `assert` statements to validate the output.
-3. TEST HARNESS: At the bottom of the script, write 3 distinct test cases including edge cases.
-
-Do not include any explanations or markdown formatting. Output ONLY valid, executable Python code.
+CRITIC_PROMPT = """
+You are an expert Code Reviewer. Analyze the following Python code. 
+Identify missing preconditions (input validation), postconditions (output validation), and potential edge cases.
+Output a brief list of the flaws you found.
 """
 
-def ask_ai_for_code(task_description, error_feedback=""):
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-    ]
+BUILDER_PROMPT = """
+You are an expert Software Engineer practicing "Design by Contract".
+Based on the flaws identified, rewrite the code. 
+RULES:
+1. Add assert statements at the start of functions for PRECONDITIONS.
+2. Add assert statements before returns for POSTCONDITIONS.
+3. Add a test harness at the bottom with 3 test cases.
+Output ONLY the valid, executable Python code. No markdown formatting.
+"""
+
+def run_agent(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        original_code = f.read()
     
-    if error_feedback:
-        messages.append({"role": "user", "content": f"{task_description}\n\nYour previous code failed with this error:\n{error_feedback}\n\nFix the code and try again."})
-    else:
-        messages.append({"role": "user", "content": task_description})
+    print(f"\n[CRITIC] Analyzing {file_path}...")
     
-    print(f" Asking AI to write code...\n")
-    
-    # Notice we now use the model_name variable from the .env file!
-    response = client.chat.completions.create(
-        model=model_name, 
-        messages=messages,
+    critique_response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": CRITIC_PROMPT},
+            {"role": "user", "content": original_code}
+        ],
         temperature=0.2
     )
-    
-    return response.choices[0].message.content
+    critique = critique_response.choices[0].message.content
+    print(f"--- CRITIQUE ---\n{critique}\n")
 
-def execute_code_locally(code_string):
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(code_string)
+    print("[BUILDER] Rewriting code...")
+    
+    refactor_response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": BUILDER_PROMPT},
+            {"role": "user", "content": f"Original Code:\n{original_code}\n\nCritique:\n{critique}"}
+        ],
+        temperature=0.2
+    )
+    refactored_code = refactor_response.choices[0].message.content
+    
+    if "```python" in refactored_code:
+        refactored_code = refactored_code.split("```python")[1].split("```")[0]
+    elif "```" in refactored_code:
+        refactored_code = refactored_code.split("```")[1].split("```")[0]
+        
+    print(f"--- REFACTORED CODE ---\n{refactored_code}\n")
+
+    print("[TESTER] Executing code...")
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+        f.write(refactored_code)
         temp_file = f.name
     
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+
     try:
-        result = subprocess.run(["python", temp_file], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(
+            ["python", temp_file], 
+            capture_output=True, 
+            text=True, 
+            timeout=10,
+            env=env
+        )
         
         if result.returncode == 0:
-            return True, ""
+            print("[SUCCESS] Code passed all tests.")
         else:
-            return False, result.stderr.strip()
+            print(f"[FAILED] {result.stderr.strip()}")
             
-    except subprocess.TimeoutExpired:
-        return False, "Execution timed out (possible infinite loop)"
+    except Exception as e:
+        print(f"[ERROR] Execution Error: {e}")
     finally:
-        os.remove(temp_file)
-
-def generate_and_verify(task, max_retries=3):
-    code = None
-    last_error = ""
-    
-    for attempt in range(max_retries):
-        print(f"\n{'='*50}")
-        print(f"ATTEMPT {attempt + 1}/{max_retries}")
-        print('='*50)
-        
-        code = ask_ai_for_code(task, last_error)
-        
-        print("\n--- Generated Code ---")
-        print(code[:500] + "..." if len(code) > 500 else code)
-        
-        success, error = execute_code_locally(code)
-        
-        if success:
-            print("\n✅ SUCCESS! Code passed all tests!")
-            return code
-        else:
-            print(f"\n❌ FAILED: {error}")
-            last_error = error
-    
-    print("\n⚠️ Max retries reached. Could not generate working code.")
-    return code
+        try:
+            os.remove(temp_file)
+        except FileNotFoundError:
+            pass
 
 if __name__ == "__main__":
-    task = "Write a simple function called `add(a, b)` that returns the sum of two numbers. Include assert statements to verify both inputs are numbers. Add 2 simple test cases at the bottom."
-    
-    final_code = generate_and_verify(task)
+    if len(sys.argv) > 1:
+        target_file = sys.argv[1]
+    else:
+        target_file = "test_code.py"
+
+    if not os.path.exists(target_file):
+        print(f"Error: File '{target_file}' not found.")
+    else:
+        run_agent(target_file)
